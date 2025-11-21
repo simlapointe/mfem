@@ -2805,7 +2805,6 @@ void ParNCMesh::SendRebalanceDofs(int old_ndofs,
       for (int i = 0; i < ne; i++)
       {
          old_element_dofs.GetRow(msg.elem_ids[i], dofs);
-         space->DofsToVDofs(dofs, old_ndofs);
          msg.dofs.insert(msg.dofs.end(), dofs.begin(), dofs.end());
       }
       msg.dof_offset = old_global_offset;

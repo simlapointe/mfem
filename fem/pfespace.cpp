@@ -4371,7 +4371,7 @@ static int_type* make_j_array(int_type* I, int nrows)
 
 HypreParMatrix*
 ParFiniteElementSpace::RebalanceMatrix(int old_ndofs,
-                                       const Table* old_elem_dof,
+                                       const Table* old_elem_vdof,
                                        const Table* old_elem_fos)
 {
    MFEM_VERIFY(Nonconforming(), "Only supported for nonconforming meshes.");
@@ -4383,9 +4383,9 @@ ParFiniteElementSpace::RebalanceMatrix(int old_ndofs,
 
    // send old DOFs of elements we used to own
    ParNCMesh* old_pncmesh = pmesh->pncmesh;
-   old_pncmesh->SendRebalanceDofs(old_ndofs, *old_elem_dof, old_offset, this);
+   old_pncmesh->SendRebalanceDofs(old_ndofs, *old_elem_vdof, old_offset, this);
 
-   Array<int> dofs;
+   Array<int> vdofs;
    int vsize = GetVSize();
 
    const Array<int> &old_index = old_pncmesh->GetRebalanceOldIndex();
@@ -4399,21 +4399,18 @@ ParFiniteElementSpace::RebalanceMatrix(int old_ndofs,
    {
       if (old_index[i] >= 0) // we had this element before
       {
-         const int* old_dofs = old_elem_dof->GetRow(old_index[i]);
-         GetElementDofs(i, dofs);
+         const int* old_vdofs = old_elem_vdof->GetRow(old_index[i]);
+         GetElementVDofs(i, vdofs);
 
-         for (int vd = 0; vd < vdim; vd++)
+         for (int j = 0; j < vdofs.Size(); j++)
          {
-            for (int j = 0; j < dofs.Size(); j++)
-            {
-               int row = DofToVDof(dofs[j], vd);
-               if (row < 0) { row = -1 - row; }
+            int row = vdofs[j];
+            if (row < 0) { row = -1 - row; }
 
-               int col = DofToVDof(old_dofs[j], vd, old_ndofs);
-               if (col < 0) { col = -1 - col; }
+            int col = old_vdofs[j];
+            if (col < 0) { col = -1 - col; }
 
-               i_diag[row] = col;
-            }
+            i_diag[row] = col;
          }
       }
    }
@@ -4421,28 +4418,24 @@ ParFiniteElementSpace::RebalanceMatrix(int old_ndofs,
 
    // receive old DOFs for elements we obtained from others in Rebalance
    Array<int> new_elements;
-   Array<long> old_remote_dofs;
-   old_pncmesh->RecvRebalanceDofs(new_elements, old_remote_dofs);
+   Array<long> old_remote_vdofs;
+   old_pncmesh->RecvRebalanceDofs(new_elements, old_remote_vdofs);
 
    // create the off-diagonal part of the matrix
    HYPRE_BigInt* i_offd = make_i_array<HYPRE_BigInt>(vsize);
    for (int i = 0, pos = 0; i < new_elements.Size(); i++)
    {
-      GetElementDofs(new_elements[i], dofs);
-      const long* old_dofs = &old_remote_dofs[pos];
-      pos += dofs.Size() * vdim;
+      GetElementVDofs(new_elements[i], vdofs);
+      const long* old_vdofs = &old_remote_vdofs[pos];
+      pos += vdofs.Size();
 
-      for (int vd = 0; vd < vdim; vd++)
+      for (int j = 0; j < vdofs.Size(); j++)
       {
-         for (int j = 0; j < dofs.Size(); j++)
+         int row = vdofs[j];
+         if (row < 0) { row = -1 - row; }
+         if (i_diag[row] == i_diag[row+1]) // diag row empty?
          {
-            int row = DofToVDof(dofs[j], vd);
-            if (row < 0) { row = -1 - row; }
-
-            if (i_diag[row] == i_diag[row+1]) // diag row empty?
-            {
-               i_offd[row] = old_dofs[j + vd * dofs.Size()];
-            }
+            i_offd[row] = old_vdofs[j];
          }
       }
    }
@@ -4908,6 +4901,7 @@ void ParFiniteElementSpace::Update(bool want_transform)
 
    Table* old_elem_dof = NULL;
    Table* old_elem_fos = NULL;
+   Table* old_elem_vdof = NULL;
    int old_ndofs = 0;
 
    // save old DOF table
@@ -4915,9 +4909,42 @@ void ParFiniteElementSpace::Update(bool want_transform)
    {
       old_elem_dof = elem_dof;
       old_elem_fos = elem_fos;
+      old_ndofs = ndofs;
+
+      old_elem_vdof = new Table;
+      const int ne = elem_dof->Size();
+      old_elem_vdof->MakeI(ne);
+      Array<int> dofs;
+      for (int i = 0; i < ne; i++)
+      {
+         elem_dof->GetRow(i, dofs);
+         for (int j = 0; j < dofs.Size(); j++)
+         {
+            int dof = dofs[j];
+            if (dof < 0) dof = -1 - dof;
+            dofs[j] = dof;
+         }
+         DofsToVDofs(dofs, ndofs);
+         old_elem_vdof->AddColumnsInRow(i, dofs.Size());
+      }
+
+      old_elem_vdof->MakeJ();
+      for (int i = 0; i < ne; i++)
+      {
+         elem_dof->GetRow(i, dofs);
+         for (int j = 0; j < dofs.Size(); j++)
+         {
+            int dof = dofs[j];
+            if (dof < 0) dof = -1 - dof;
+            dofs[j] = dof;
+         }
+         DofsToVDofs(dofs, ndofs);
+         old_elem_vdof->AddConnections(i, dofs, dofs.Size());
+      }
+      old_elem_vdof->ShiftUpI();
+
       elem_dof = NULL;
       elem_fos = NULL;
-      old_ndofs = ndofs;
       Swap(dof_offsets, old_dof_offsets);
    }
 
@@ -4977,7 +5004,7 @@ void ParFiniteElementSpace::Update(bool want_transform)
 
          case Mesh::REBALANCE:
          {
-            Th.Reset(RebalanceMatrix(old_ndofs, old_elem_dof, old_elem_fos));
+            Th.Reset(RebalanceMatrix(old_ndofs, old_elem_vdof, old_elem_fos));
             break;
          }
 
@@ -4987,6 +5014,7 @@ void ParFiniteElementSpace::Update(bool want_transform)
 
       delete old_elem_dof;
       delete old_elem_fos;
+      delete old_elem_vdof;
    }
 }
 

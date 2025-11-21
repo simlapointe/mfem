@@ -133,6 +133,7 @@ set(UNIT_TESTS_SRCS
   fem/test_quadraturefunc.cpp
   fem/test_r1d_bilininteg.cpp
   fem/test_r2d_bilininteg.cpp
+  fem/test_refine_rebalance.cpp
   fem/test_sparse_matrix.cpp
   fem/test_sum_bilin.cpp
   fem/test_surf_blf.cpp
